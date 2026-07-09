@@ -1,3 +1,4 @@
+import { RunArtifacts, summarizeJob, summarizePipeline } from "./artifacts/runArtifacts.js";
 import { runConfigMenu } from "./config/configMenu.js";
 import { loadReleaseConfig } from "./config/configStore.js";
 import { logger } from "./logger.js";
@@ -5,9 +6,9 @@ import { askReleaseConfirmation } from "./release/confirmation.js";
 import { collectReleaseChanges, createConfiguredGitLabClient } from "./release/changeCollector.js";
 import { waitForPipelineCompletion } from "./release/pipelineCompletion.js";
 import { createTagAndStartManualJob } from "./release/pipelineStarter.js";
-import { printChanges, printReleasePreview } from "./release/preview.js";
+import { formatReleasePreview, printChanges } from "./release/preview.js";
 import { parseReleaseVersion, toGitLabReleaseTagName, type ReleaseVersion } from "./tag.js";
-import { throwIfAborted } from "./utils/abort.js";
+import { isUserAbortError, throwIfAborted } from "./utils/abort.js";
 
 type ParsedArgs = {
   tagName?: string;
@@ -118,7 +119,8 @@ async function runReleasePreviewCommand(
 
   const changes = await collectReleaseChanges(client, releaseConfig);
   logger.step("Printing preview");
-  printReleasePreview(tagName, changes, releaseConfig);
+  const previewText = formatReleasePreview(tagName, changes, releaseConfig);
+  console.log(previewText);
 
   if (args.dryRun) {
     logger.step("Dry-run finished. No tag was created.");
@@ -131,12 +133,36 @@ async function runReleasePreviewCommand(
     return 0;
   }
 
-  const result = await createTagAndStartManualJob(client, tagName, changes, releaseConfig, signal);
-  logger.step("Tag was created and manual job was started.");
-  logger.info(`Pipeline: ${result.pipeline.web_url}`);
-  logger.info(`Manual job: ${result.playedJob.web_url}`);
-  await waitForPipelineCompletion(client, result.pipeline.id, releaseConfig, signal);
-  return 0;
+  const artifacts = await RunArtifacts.create({
+    tagName,
+    releaseConfig,
+    changes,
+    previewText,
+  });
+  const detachLogger = logger.addSink((entry) => artifacts.log(entry));
+  logger.info(`Run artifacts: ${artifacts.directory}`);
+
+  try {
+    await artifacts.trace("confirmation_accepted");
+    const result = await createTagAndStartManualJob(client, tagName, changes, releaseConfig, signal, artifacts);
+    logger.step("Tag was created and manual job was started.");
+    logger.info(`Pipeline: ${result.pipeline.web_url}`);
+    logger.info(`Manual job: ${result.playedJob.web_url}`);
+    const completedPipeline = await waitForPipelineCompletion(client, result.pipeline.id, releaseConfig, signal, artifacts);
+    await artifacts.finish("success", {
+      pipeline: summarizePipeline(completedPipeline),
+      manualJob: summarizeJob(result.playedJob),
+    });
+    return 0;
+  } catch (error) {
+    const status = isUserAbortError(error) ? "cancelled" : "failed";
+    await artifacts.recordError(error);
+    await artifacts.finish(status);
+    throw error;
+  } finally {
+    detachLogger();
+    await artifacts.close();
+  }
 }
 
 function printHelp(): void {

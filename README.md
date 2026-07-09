@@ -210,6 +210,28 @@ After `yes`, the script will:
 5. Wait for final pipeline status.
 6. Print success or failure summary.
 
+## Run artifacts
+
+For real release runs, artifacts are created only after the confirmation answer is accepted.
+Cancelled previews and dry-runs are not stored.
+
+Artifacts are stored outside the repository:
+
+```text
+%APPDATA%\release-tag\runs
+```
+
+Each confirmed run gets its own directory with:
+
+- `run.json`: run metadata and final status.
+- `preview.txt`: the preview shown before confirmation.
+- `trace.jsonl`: structured event trace for tag, pipeline, manual job, and errors.
+- `console.log`: CLI log lines written after confirmation.
+- `error.json`: error details, only when the run fails or is cancelled after confirmation.
+
+Only the latest 10 confirmed run directories are kept. Older artifact directories are removed automatically.
+The GitLab token is never written to run artifacts.
+
 ## Stop execution
 
 Press:

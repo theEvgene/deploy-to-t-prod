@@ -1,3 +1,5 @@
+import type { RunArtifacts } from "../artifacts/runArtifacts.js";
+import { summarizeJob, summarizePipeline } from "../artifacts/runArtifacts.js";
 import type { ReleaseConfig } from "../constants.js";
 import { GitLabClient } from "../gitlab/GitLabClient.js";
 import type { GitLabJob, GitLabPipeline, GitLabPipelineStatus } from "../gitlab/types.js";
@@ -12,6 +14,7 @@ export async function waitForPipelineCompletion(
   pipelineId: number,
   releaseConfig: ReleaseConfig,
   signal: AbortSignal,
+  artifacts?: RunArtifacts,
 ): Promise<GitLabPipeline> {
   logger.step("Waiting for pipeline completion");
   return pollUntil({
@@ -21,6 +24,9 @@ export async function waitForPipelineCompletion(
     action: async () => {
       const pipeline = await client.getPipeline(pipelineId);
       logger.info(`Pipeline #${pipeline.id} status: ${pipeline.status}`);
+      await artifacts?.trace("pipeline_completion_poll", {
+        pipeline: summarizePipeline(pipeline),
+      });
 
       if (successStatuses.has(pipeline.status)) {
         printSuccessSummary(pipeline);
@@ -30,6 +36,10 @@ export async function waitForPipelineCompletion(
       if (failureStatuses.has(pipeline.status)) {
         const jobs = await client.listPipelineJobs(pipeline.id);
         printFailureSummary(pipeline, jobs);
+        await artifacts?.trace("pipeline_failed", {
+          pipeline: summarizePipeline(pipeline),
+          failedJobs: jobs.filter((job) => finalFailureJobStatuses.has(job.status)).map(summarizeJob),
+        });
         throw new Error(`Pipeline #${pipeline.id} finished with status ${pipeline.status}.`);
       }
 
@@ -39,6 +49,10 @@ export async function waitForPipelineCompletion(
       const pipeline = await client.getPipeline(pipelineId);
       const jobs = await client.listPipelineJobs(pipeline.id);
       printFailureSummary(pipeline, jobs);
+      await artifacts?.trace("pipeline_timeout", {
+        pipeline: summarizePipeline(pipeline),
+        jobs: jobs.map(summarizeJob),
+      });
       throw new Error(
         `Pipeline #${pipeline.id} did not finish within ${releaseConfig.pipelineTimeoutMinutes} minutes after manual job start.`,
       );

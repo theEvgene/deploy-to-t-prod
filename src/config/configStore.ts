@@ -14,13 +14,17 @@ const configDirectoryName = "release-tag";
 const configFileName = "config.json";
 
 export function getConfigFilePath(): string {
+  return join(getConfigDirectoryPath(), configFileName);
+}
+
+export function getConfigDirectoryPath(): string {
   const appDataPath = process.env.APPDATA;
 
   if (!appDataPath) {
     throw new Error("APPDATA is not set. Cannot resolve local config file path.");
   }
 
-  return join(appDataPath, configDirectoryName, configFileName);
+  return join(appDataPath, configDirectoryName);
 }
 
 export async function readConfig(): Promise<LocalConfig> {
