@@ -3,6 +3,7 @@ import { logger } from "../logger.js";
 import { UserAbortError } from "../utils/abort.js";
 import type {
   GitLabBranch,
+  GitLabBridge,
   GitLabClientConfig,
   GitLabCommit,
   GitLabCompareResponse,
@@ -112,6 +113,24 @@ export class GitLabClient {
 
   listPipelineJobs(pipelineId: number, scopes?: GitLabJobStatus[]): Promise<GitLabJob[]> {
     return this.requestAllPages<GitLabJob>("GET", `/projects/${this.projectId}/pipelines/${pipelineId}/jobs`, {
+      include_retried: true,
+      per_page: 100,
+      "scope[]": scopes,
+    });
+  }
+
+  listPipelineBridges(pipelineId: number, projectId: number | string = this.projectId): Promise<GitLabBridge[]> {
+    return this.requestAllPages<GitLabBridge>("GET", `/projects/${projectId}/pipelines/${pipelineId}/bridges`, {
+      per_page: 100,
+    });
+  }
+
+  getPipelineFromProject(projectId: number | string, pipelineId: number): Promise<GitLabPipeline> {
+    return this.request<GitLabPipeline>("GET", `/projects/${encodeURIComponent(String(projectId))}/pipelines/${pipelineId}`);
+  }
+
+  listPipelineJobsFromProject(projectId: number | string, pipelineId: number, scopes?: GitLabJobStatus[]): Promise<GitLabJob[]> {
+    return this.requestAllPages<GitLabJob>("GET", `/projects/${encodeURIComponent(String(projectId))}/pipelines/${pipelineId}/jobs`, {
       include_retried: true,
       per_page: 100,
       "scope[]": scopes,

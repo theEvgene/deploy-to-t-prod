@@ -11,7 +11,7 @@
     "check": "npm run build && npm test",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
-    "test": "tsx --test test/tag.test.ts test/configStore.test.ts test/tagSelection.test.ts test/runArtifacts.test.ts",
+    "test": "tsx --test test/tag.test.ts test/configStore.test.ts test/tagSelection.test.ts test/runArtifacts.test.ts test/pipelineStarter.test.ts",
     "typecheck": "tsc -p tsconfig.json"
   },
   "engines": {

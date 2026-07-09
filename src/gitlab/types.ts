@@ -69,6 +69,16 @@ export type GitLabPipeline = {
   yaml_errors?: string | null;
 };
 
+export type GitLabBridge = {
+  id: number;
+  name: string;
+  stage: string;
+  status: GitLabJobStatus;
+  ref: string;
+  web_url: string;
+  downstream_pipeline?: GitLabPipeline;
+};
+
 export type GitLabJobStatus =
   | "created"
   | "pending"

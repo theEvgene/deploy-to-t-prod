@@ -1,6 +1,6 @@
 import type { ReleaseConfig } from "../constants.js";
 import { GitLabClient } from "../gitlab/GitLabClient.js";
-import type { GitLabJob, GitLabPipeline, GitLabPipelineStatus } from "../gitlab/types.js";
+import type { GitLabBridge, GitLabJob, GitLabPipeline, GitLabPipelineStatus } from "../gitlab/types.js";
 import { logger } from "../logger.js";
 import type { RunArtifacts } from "../artifacts/runArtifacts.js";
 import { summarizeJob, summarizePipeline } from "../artifacts/runArtifacts.js";
@@ -20,6 +20,37 @@ const terminalPipelineStatuses = new Set<GitLabPipelineStatus>([
   "canceled",
   "skipped",
 ]);
+const maxDownstreamPipelineDepth = 5;
+
+type PipelineNode = {
+  projectId?: number | string;
+  pipelineId: number;
+  depth: number;
+};
+
+type PipelineTreeGitLabClient = Pick<
+  GitLabClient,
+  | "getPipeline"
+  | "getPipelineFromProject"
+  | "listPipelineJobs"
+  | "listPipelineJobsFromProject"
+  | "listPipelineBridges"
+>;
+
+export type ManualJobSearchResult = {
+  pipeline: GitLabPipeline;
+  jobs: GitLabJob[];
+  bridges: GitLabBridge[];
+  namedJob?: GitLabJob;
+  searchedPipelines: Array<{
+    projectId?: number | string;
+    pipelineId: number;
+    depth: number;
+    status: GitLabPipelineStatus;
+    jobsCount: number;
+    bridgesCount: number;
+  }>;
+};
 
 export async function createTagAndStartManualJob(
   client: GitLabClient,
@@ -116,12 +147,13 @@ async function waitForManualJob(
     intervalSeconds: releaseConfig.pollIntervalSeconds,
     signal,
     action: async () => {
-      const pipeline = await client.getPipeline(pipelineId);
-      const jobs = await client.listPipelineJobs(pipelineId);
-      const namedJob = jobs.find((job) => job.name === releaseConfig.manualJobName);
+      const result = await findManualJobInPipelineTree(client, pipelineId, releaseConfig.manualJobName);
+      const { pipeline, jobs, bridges, namedJob, searchedPipelines } = result;
       await artifacts?.trace("manual_job_poll", {
         pipeline: summarizePipeline(pipeline),
-        jobsCount: jobs.length,
+        searchedPipelines,
+        jobs: jobs.map(summarizeJob),
+        bridges: bridges.map(summarizeBridge),
         namedJob: namedJob ? summarizeJob(namedJob) : undefined,
       });
 
@@ -130,9 +162,13 @@ async function waitForManualJob(
       }
 
       if (namedJob) {
-        logger.info(`Manual job ${releaseConfig.manualJobName} is currently ${namedJob.status}.`);
+        logger.info(`Manual job ${releaseConfig.manualJobName} is currently ${namedJob.status}: ${namedJob.web_url}`);
       } else {
-        logger.info(`Manual job ${releaseConfig.manualJobName} is not available yet.`);
+        const bridgeNames = bridges.map((bridge) => bridge.name).join(", ") || "none";
+        const jobNames = jobs.map((job) => job.name).join(", ") || "none";
+        logger.info(
+          `Manual job ${releaseConfig.manualJobName} is not available yet. Checked ${searchedPipelines.length} pipeline(s). Jobs: ${jobNames}. Bridges: ${bridgeNames}.`,
+        );
       }
 
       if (terminalPipelineStatuses.has(pipeline.status)) {
@@ -149,6 +185,106 @@ async function waitForManualJob(
       );
     },
   });
+}
+
+export async function findManualJobInPipelineTree(
+  client: PipelineTreeGitLabClient,
+  rootPipelineId: number,
+  manualJobName: string,
+): Promise<ManualJobSearchResult> {
+  const queue: PipelineNode[] = [{ pipelineId: rootPipelineId, depth: 0 }];
+  const visited = new Set<string>();
+  const allJobs: GitLabJob[] = [];
+  const allBridges: GitLabBridge[] = [];
+  const searchedPipelines: ManualJobSearchResult["searchedPipelines"] = [];
+  let fallbackPipeline: GitLabPipeline | undefined;
+
+  while (queue.length > 0) {
+    const node = queue.shift()!;
+    const visitKey = `${node.projectId ?? "root"}:${node.pipelineId}`;
+    if (visited.has(visitKey)) {
+      continue;
+    }
+    visited.add(visitKey);
+
+    const pipeline = await getPipelineForNode(client, node);
+    fallbackPipeline ??= pipeline;
+
+    const jobs = await listJobsForNode(client, node);
+    const bridges = await listBridgesForNode(client, node);
+    allJobs.push(...jobs);
+    allBridges.push(...bridges);
+    searchedPipelines.push({
+      projectId: node.projectId,
+      pipelineId: node.pipelineId,
+      depth: node.depth,
+      status: pipeline.status,
+      jobsCount: jobs.length,
+      bridgesCount: bridges.length,
+    });
+
+    const namedJob = jobs.find((job) => job.name === manualJobName);
+    if (namedJob) {
+      return {
+        pipeline,
+        jobs: allJobs,
+        bridges: allBridges,
+        namedJob,
+        searchedPipelines,
+      };
+    }
+
+    if (node.depth >= maxDownstreamPipelineDepth) {
+      continue;
+    }
+
+    for (const bridge of bridges) {
+      if (bridge.downstream_pipeline?.id) {
+        queue.push({
+          projectId: bridge.downstream_pipeline.project_id,
+          pipelineId: bridge.downstream_pipeline.id,
+          depth: node.depth + 1,
+        });
+      }
+    }
+  }
+
+  return {
+    pipeline: fallbackPipeline ?? await client.getPipeline(rootPipelineId),
+    jobs: allJobs,
+    bridges: allBridges,
+    searchedPipelines,
+  };
+}
+
+function getPipelineForNode(client: PipelineTreeGitLabClient, node: PipelineNode): Promise<GitLabPipeline> {
+  return node.projectId === undefined
+    ? client.getPipeline(node.pipelineId)
+    : client.getPipelineFromProject(node.projectId, node.pipelineId);
+}
+
+function listJobsForNode(client: PipelineTreeGitLabClient, node: PipelineNode): Promise<GitLabJob[]> {
+  return node.projectId === undefined
+    ? client.listPipelineJobs(node.pipelineId)
+    : client.listPipelineJobsFromProject(node.projectId, node.pipelineId);
+}
+
+function listBridgesForNode(client: PipelineTreeGitLabClient, node: PipelineNode): Promise<GitLabBridge[]> {
+  return node.projectId === undefined
+    ? client.listPipelineBridges(node.pipelineId)
+    : client.listPipelineBridges(node.pipelineId, node.projectId);
+}
+
+function summarizeBridge(bridge: GitLabBridge): Record<string, unknown> {
+  return {
+    id: bridge.id,
+    name: bridge.name,
+    stage: bridge.stage,
+    status: bridge.status,
+    ref: bridge.ref,
+    webUrl: bridge.web_url,
+    downstreamPipeline: bridge.downstream_pipeline ? summarizePipeline(bridge.downstream_pipeline) : undefined,
+  };
 }
 
 function pickPipeline(pipelines: GitLabPipeline[], targetCommitSha: string): GitLabPipeline | undefined {
