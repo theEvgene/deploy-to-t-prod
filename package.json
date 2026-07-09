@@ -1,0 +1,25 @@
+{
+  "name": "deploy-to-t-prod",
+  "version": "0.1.0",
+  "description": "CLI utility for creating GitLab release tags and running release deployment jobs.",
+  "type": "module",
+  "bin": {
+    "release-tag": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "npm run build && npm test",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "test": "tsx --test test/tag.test.ts test/configStore.test.ts test/tagSelection.test.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.4",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}
