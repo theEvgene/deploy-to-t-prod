@@ -32,7 +32,7 @@ export async function readConfig(): Promise<LocalConfig> {
 
   try {
     const content = await readFile(configPath, "utf8");
-    const parsed = JSON.parse(content) as LocalConfig;
+    const parsed = JSON.parse(stripLeadingBom(content)) as LocalConfig;
     return {
       gitlabToken: typeof parsed.gitlabToken === "string" ? parsed.gitlabToken : undefined,
       gitlabBaseUrl: typeof parsed.gitlabBaseUrl === "string" ? parsed.gitlabBaseUrl : undefined,
@@ -147,6 +147,10 @@ export function formatConfigForDisplay(config: LocalConfig): string[] {
 
 function normalizeGitLabBaseUrl(value: string): string {
   return value.trim().replace(/\/$/, "");
+}
+
+function stripLeadingBom(value: string): string {
+  return value.charCodeAt(0) === 0xfeff ? value.slice(1) : value;
 }
 
 function extractProjectSlug(projectPath: string): string {
