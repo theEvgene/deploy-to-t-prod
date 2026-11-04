@@ -1,129 +1,254 @@
 import assert from "node:assert/strict";
-import { mock, test } from "node:test";
+import { test } from "node:test";
 
-const spawnSyncMock = mock.fn(() => ({ status: 0, signal: null, error: undefined }));
+import { ensureSystemCa } from "../src/index.js";
 
-mock.module("node:child_process", {
-  exports: {
-    spawnSync: spawnSyncMock,
-  },
-});
+type SpawnResult = {
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  error?: unknown;
+};
 
-const exitCalls: number[] = [];
-process.exit = ((code?: number) => {
-  exitCalls.push(code ?? 0);
-  throw new Error(`EXIT:${code ?? 0}`);
-}) as never;
+type SpawnCall = {
+  execPath: string;
+  args: string[];
+  options: { stdio: "inherit" };
+};
 
-const killCalls: { pid: number; signal: any }[] = [];
-process.kill = ((pid: number, signal: any) => {
-  killCalls.push({ pid, signal });
-  throw new Error(`KILL:${signal}`);
-}) as never;
+function makeHarness(impl: () => SpawnResult) {
+  const spawnCalls: SpawnCall[] = [];
+  const exitCalls: number[] = [];
+  const killCalls: { pid: number; signal: NodeJS.Signals }[] = [];
+  let spawnImpl = impl;
 
-process.execArgv = ["--use-system-ca"];
-process.argv = [process.execPath, "index.js", "--help"];
+  const spawnSyncFn = (execPath: string, args: string[], options: { stdio: "inherit" }) => {
+    spawnCalls.push({ execPath, args, options });
+    return spawnImpl();
+  };
+  const exitFn = ((code: number): never => {
+    exitCalls.push(code);
+    throw new Error(`EXIT:${code}`);
+  }) as (code: number) => never;
+  const killFn = ((pid: number, signal: NodeJS.Signals): void => {
+    killCalls.push({ pid, signal });
+    throw new Error(`KILL:${String(signal)}`);
+  }) as (pid: number, signal: NodeJS.Signals) => void;
 
-const mod = await import("../src/index.js");
-const ensureSystemCa = mod.ensureSystemCa as () => void;
+  return {
+    spawnCalls,
+    exitCalls,
+    killCalls,
+    spawnSyncFn,
+    exitFn,
+    killFn,
+    setSpawnImpl(next: () => SpawnResult): void {
+      spawnImpl = next;
+    },
+  };
+}
+
+function captureConsoleError(): { messages: string[]; restore: () => void } {
+  const messages: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => {
+    messages.push(args.map(String).join(" "));
+  };
+  return {
+    messages,
+    restore: () => {
+      console.error = original;
+    },
+  };
+}
+
+const SUPPORTED_VERSION = "v24.18.0";
 
 test("does not respawn when --use-system-ca is already present", () => {
-  spawnSyncMock.mock.resetCalls();
-  exitCalls.length = 0;
-  killCalls.length = 0;
-  process.execArgv = ["--use-system-ca"];
+  const harness = makeHarness(() => ({ status: 0, signal: null }));
   const beforeEnv = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
-  ensureSystemCa();
-  assert.equal(spawnSyncMock.mock.calls.length, 0);
+  ensureSystemCa({
+    ...harness,
+    execArgv: ["--use-system-ca"],
+    argv: [process.execPath, "script.js", "--help"],
+    version: SUPPORTED_VERSION,
+  });
+  assert.equal(harness.spawnCalls.length, 0);
+  assert.equal(harness.exitCalls.length, 0);
   assert.equal(process.env.NODE_TLS_REJECT_UNAUTHORIZED, beforeEnv);
 });
 
 test("respawns exactly once with identical args when flag is absent", () => {
-  spawnSyncMock.mock.resetCalls();
-  spawnSyncMock.mock.mockImplementation(() => ({ status: 0, signal: null, error: undefined }));
-  exitCalls.length = 0;
-  killCalls.length = 0;
-  process.execArgv = ["--foo"];
-  process.argv = [process.execPath, "script.js", "arg1"];
+  const harness = makeHarness(() => ({ status: 0, signal: null }));
   const beforeEnv = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
-  assert.throws(() => ensureSystemCa(), /EXIT:0/);
-  assert.equal(spawnSyncMock.mock.calls.length, 1);
-  const call = spawnSyncMock.mock.calls[0];
-  assert.equal(call.arguments[0], process.execPath);
-  assert.deepEqual(call.arguments[1], ["--use-system-ca", "--foo", "script.js", "arg1"]);
-  assert.deepEqual(call.arguments[2], { stdio: "inherit" });
+  assert.throws(
+    () =>
+      ensureSystemCa({
+        ...harness,
+        execArgv: ["--foo"],
+        argv: [process.execPath, "script.js", "arg1"],
+        version: SUPPORTED_VERSION,
+      }),
+    /EXIT:0/,
+  );
+  assert.equal(harness.spawnCalls.length, 1);
+  const call = harness.spawnCalls[0];
+  assert.equal(call.execPath, process.execPath);
+  assert.deepEqual(call.args, ["--use-system-ca", "--foo", "script.js", "arg1"]);
+  assert.deepEqual(call.options, { stdio: "inherit" });
   assert.equal(process.env.NODE_TLS_REJECT_UNAUTHORIZED, beforeEnv);
 });
 
 test("propagates child exit code", () => {
-  spawnSyncMock.mock.resetCalls();
-  spawnSyncMock.mock.mockImplementation(() => ({ status: 42, signal: null, error: undefined }));
-  exitCalls.length = 0;
-  process.execArgv = [];
-  process.argv = [process.execPath, "script.js"];
-  assert.throws(() => ensureSystemCa(), /EXIT:42/);
-  assert.ok(exitCalls.includes(42));
+  const harness = makeHarness(() => ({ status: 42, signal: null }));
+  assert.throws(
+    () =>
+      ensureSystemCa({
+        ...harness,
+        execArgv: [],
+        argv: [process.execPath, "script.js"],
+        version: SUPPORTED_VERSION,
+      }),
+    /EXIT:42/,
+  );
+  assert.ok(harness.exitCalls.includes(42));
 });
 
-test("propagates child signal", () => {
-  spawnSyncMock.mock.resetCalls();
-  spawnSyncMock.mock.mockImplementation(() => ({ status: null, signal: "SIGTERM", error: undefined }));
-  killCalls.length = 0;
-  process.execArgv = [];
-  process.argv = [process.execPath, "script.js"];
-  assert.throws(() => ensureSystemCa(), /KILL:SIGTERM/);
+test("forwards child signal without falling through to the CLI", () => {
+  const harness = makeHarness(() => ({ status: null, signal: "SIGTERM" }));
+  assert.throws(
+    () =>
+      ensureSystemCa({
+        ...harness,
+        execArgv: [],
+        argv: [process.execPath, "script.js"],
+        version: SUPPORTED_VERSION,
+      }),
+    /KILL:SIGTERM/,
+  );
+  assert.equal(harness.killCalls.length, 1);
+  assert.equal(harness.killCalls[0].pid, process.pid);
+  assert.equal(harness.killCalls[0].signal, "SIGTERM");
+  assert.equal(harness.exitCalls.length, 0);
+});
+
+test("exits non-zero when signal forwarding does not terminate the process", () => {
+  const exitCalls: number[] = [];
+  const killCalls: { pid: number; signal: NodeJS.Signals }[] = [];
+  assert.throws(
+    () =>
+      ensureSystemCa({
+        spawnSyncFn: () => ({ status: null, signal: "SIGTERM" }),
+        exitFn: ((code: number): never => {
+          exitCalls.push(code);
+          throw new Error(`EXIT:${code}`);
+        }) as (code: number) => never,
+        killFn: ((pid: number, signal: NodeJS.Signals): void => {
+          killCalls.push({ pid, signal });
+        }) as (pid: number, signal: NodeJS.Signals) => void,
+        execArgv: [],
+        argv: [process.execPath, "script.js"],
+        version: SUPPORTED_VERSION,
+      }),
+    /EXIT:1/,
+  );
   assert.equal(killCalls.length, 1);
-  assert.equal(killCalls[0].signal, "SIGTERM");
+  assert.ok(exitCalls.includes(1));
 });
 
-test("unsupported flag exits non-zero with a minimum-version error", () => {
-  spawnSyncMock.mock.resetCalls();
-  spawnSyncMock.mock.mockImplementation(() => ({ status: 9, signal: null, error: undefined }));
-  exitCalls.length = 0;
-  const errors: string[] = [];
-  const origError = console.error;
-  console.error = (...a: any[]) => {
-    errors.push(a.join(" "));
-  };
-  process.execArgv = [];
-  process.argv = [process.execPath, "script.js"];
-  assert.throws(() => ensureSystemCa(), /EXIT:1/);
-  console.error = origError;
-  assert.ok(exitCalls.includes(1));
-  assert.ok(errors.some((e) => /use-system-ca|Node\.js|version/i.test(e)));
+test("propagates status 9 as-is on supported runtimes", () => {
+  const harness = makeHarness(() => ({ status: 9, signal: null }));
+  const capture = captureConsoleError();
+  try {
+    assert.throws(
+      () =>
+        ensureSystemCa({
+          ...harness,
+          execArgv: [],
+          argv: [process.execPath, "script.js"],
+          version: SUPPORTED_VERSION,
+        }),
+      /EXIT:9/,
+    );
+    assert.ok(harness.exitCalls.includes(9));
+    assert.equal(capture.messages.length, 0);
+  } finally {
+    capture.restore();
+  }
 });
 
-test("spawn error exits non-zero with a minimum-version error", () => {
-  spawnSyncMock.mock.resetCalls();
-  spawnSyncMock.mock.mockImplementation(() => ({ status: null, signal: null, error: new Error("bad option") }));
-  exitCalls.length = 0;
-  const errors: string[] = [];
-  const origError = console.error;
-  console.error = (...a: any[]) => {
-    errors.push(a.join(" "));
-  };
-  process.execArgv = [];
-  process.argv = [process.execPath, "script.js"];
-  assert.throws(() => ensureSystemCa(), /EXIT:1/);
-  console.error = origError;
-  assert.ok(exitCalls.includes(1));
-  assert.ok(errors.some((e) => /use-system-ca|Node\.js|version/i.test(e)));
+test("rejects runtimes older than 22.15 without spawning", () => {
+  const harness = makeHarness(() => ({ status: 0, signal: null }));
+  const capture = captureConsoleError();
+  try {
+    assert.throws(
+      () =>
+        ensureSystemCa({
+          ...harness,
+          execArgv: [],
+          argv: [process.execPath, "script.js"],
+          version: "v22.14.0",
+        }),
+      /EXIT:1/,
+    );
+    assert.equal(harness.spawnCalls.length, 0);
+    assert.ok(harness.exitCalls.includes(1));
+    assert.ok(capture.messages.some((message) => /22\.15\.0/.test(message)));
+    assert.ok(capture.messages.some((message) => /use-system-ca/.test(message)));
+  } finally {
+    capture.restore();
+  }
+});
+
+test("accepts 22.15.0 as the minimum supported runtime", () => {
+  const harness = makeHarness(() => ({ status: 0, signal: null }));
+  assert.throws(
+    () =>
+      ensureSystemCa({
+        ...harness,
+        execArgv: [],
+        argv: [process.execPath, "script.js"],
+        version: "v22.15.0",
+      }),
+    /EXIT:0/,
+  );
+  assert.equal(harness.spawnCalls.length, 1);
+});
+
+test("spawn failure exits non-zero with a minimum-version error", () => {
+  const harness = makeHarness(() => ({ status: null, signal: null, error: new Error("bad option") }));
+  const capture = captureConsoleError();
+  try {
+    assert.throws(
+      () =>
+        ensureSystemCa({
+          ...harness,
+          execArgv: [],
+          argv: [process.execPath, "script.js"],
+          version: SUPPORTED_VERSION,
+        }),
+      /EXIT:1/,
+    );
+    assert.ok(harness.exitCalls.includes(1));
+    assert.ok(capture.messages.some((message) => /22\.15\.0/.test(message)));
+  } finally {
+    capture.restore();
+  }
 });
 
 test("never sets or passes insecure TLS verification env", () => {
-  spawnSyncMock.mock.resetCalls();
-  spawnSyncMock.mock.mockImplementation(() => ({ status: 0, signal: null, error: undefined }));
+  const harness = makeHarness(() => ({ status: 0, signal: null }));
   delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
-  exitCalls.length = 0;
-  process.execArgv = [];
-  process.argv = [process.execPath, "script.js"];
   try {
-    ensureSystemCa();
+    ensureSystemCa({
+      ...harness,
+      execArgv: [],
+      argv: [process.execPath, "script.js"],
+      version: SUPPORTED_VERSION,
+    });
   } catch {
-    // process.exit may throw
+    // exitFn always throws in tests.
   }
-  const call = spawnSyncMock.mock.calls[0];
-  assert.ok(call, "spawnSync should be called once");
-  assert.equal(call.arguments[2]?.env, undefined);
+  assert.equal(harness.spawnCalls.length, 1);
+  assert.equal((harness.spawnCalls[0].options as { env?: unknown }).env, undefined);
   assert.equal(process.env.NODE_TLS_REJECT_UNAUTHORIZED, undefined);
 });
