@@ -6,7 +6,7 @@ The repository is safe to publish publicly because project-specific values are s
 
 ## Requirements
 
-Requires Node.js `22.15.0` or newer (`23.8.0` or newer on the `23.x` line; `24.x` works).
+Requires Node.js `>=22.15.0 <23 || >=23.8.0` (`22.15.0` or newer below `23`; `23.8.0` or newer on the `23.x` line; `24.x` works; `23.0`–`23.7` are excluded).
 
 The minimum was raised from `>=20` because the `--use-system-ca` entry flag does not exist on Node 20.x: `v20.20.2` rejects it with `bad option: --use-system-ca` (exit `9`), while `v22.23.4` and `v24.18.0` accept it (`node --use-system-ca -e "process.exit(0)"` exits `0`). On runtimes below the floor the CLI exits non-zero with a minimum-version message instead of starting.
 
