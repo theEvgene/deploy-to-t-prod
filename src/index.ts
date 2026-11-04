@@ -1,16 +1,28 @@
 #!/usr/bin/env node
 import * as childProcess from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCli } from "./cli.js";
 import { logger } from "./logger.js";
 import { isUserAbortError } from "./utils/abort.js";
 
 const SYSTEM_CA_FLAG = "--use-system-ca";
+const UNSUPPORTED_FLAG_EXIT_CODE = 9;
 
 function printMinimumVersionError(): void {
   console.error(
     "deploy-to-t-prod requires a Node.js runtime that supports --use-system-ca " +
-      "(Node.js 22.15.0 or newer). Please upgrade Node.js and retry.",
+      "(Node.js 22.15.0 or newer, or 23.8.0 or newer on the 23.x line). " +
+      "Please upgrade Node.js and retry.",
+  );
+}
+
+function printUnsupportedFlagError(version: string): void {
+  console.error(
+    `deploy-to-t-prod could not start Node.js with ${SYSTEM_CA_FLAG}: ` +
+      `the runtime (${version}) rejected the flag with exit code ${UNSUPPORTED_FLAG_EXIT_CODE}. ` +
+      "Use Node.js 22.15.0 or newer (or 23.8.0 or newer on the 23.x line) and retry.",
   );
 }
 
@@ -21,13 +33,16 @@ function supportsSystemCaVersion(version: string): boolean {
   }
   const major = Number(match[1]);
   const minor = Number(match[2]);
-  if (major > 22) {
-    return true;
-  }
   if (major < 22) {
     return false;
   }
-  return minor >= 15;
+  if (major === 22) {
+    return minor >= 15;
+  }
+  if (major === 23) {
+    return minor >= 8;
+  }
+  return true;
 }
 
 type SystemCaSpawnResult = {
@@ -97,30 +112,70 @@ export function ensureSystemCa(deps?: SystemCaDeps): void {
     return;
   }
 
+  if (result.status === UNSUPPORTED_FLAG_EXIT_CODE) {
+    printUnsupportedFlagError(version);
+    exitFn(UNSUPPORTED_FLAG_EXIT_CODE);
+    return;
+  }
+
   exitFn(result.status ?? 1);
 }
 
-function isMainEntry(): boolean {
-  const entry = process.argv[1];
+type MainEntryDeps = {
+  entry?: string;
+  moduleUrl?: string;
+  realpath?: (filePath: string) => string;
+};
+
+function defaultRealpath(filePath: string): string {
+  const absolute = path.resolve(filePath);
+  try {
+    return fs.realpathSync.native(absolute);
+  } catch {
+    return fs.realpathSync(absolute);
+  }
+}
+
+function canonicalPath(
+  filePath: string,
+  realpath: (value: string) => string,
+): string | null {
+  try {
+    return realpath(filePath);
+  } catch {
+    return null;
+  }
+}
+
+function normalizePath(value: string, platform: NodeJS.Platform): string {
+  const slashes = value.replace(/\\/g, "/");
+  return platform === "win32" ? slashes.toLowerCase() : slashes;
+}
+
+export function isMainEntry(deps?: MainEntryDeps): boolean {
+  const entry = deps?.entry ?? process.argv[1];
+  const moduleUrl = deps?.moduleUrl ?? import.meta.url;
+  const realpath = deps?.realpath ?? defaultRealpath;
   if (!entry) {
     return false;
   }
-  const normalize = (value: string): string => value.replace(/\\/g, "/");
-  const normalizedEntry = normalize(entry);
-  let current = "";
+
+  let modulePath: string;
   try {
-    current = normalize(fileURLToPath(import.meta.url));
+    modulePath = fileURLToPath(moduleUrl);
   } catch {
     return false;
   }
-  if (normalizedEntry === current) {
-    return true;
+
+  // Resolve symlinks/junctions on both sides so an installed bin shim,
+  // a linked package directory, or an aliased entry point still matches.
+  const entryPath = canonicalPath(entry, realpath);
+  const currentPath = canonicalPath(modulePath, realpath);
+  if (!entryPath || !currentPath) {
+    return false;
   }
-  const isIndexEntry =
-    normalizedEntry.endsWith("/src/index.ts") || normalizedEntry.endsWith("/dist/index.js");
-  const isCurrentIndex =
-    current.endsWith("/src/index.ts") || current.endsWith("/dist/index.js");
-  return isIndexEntry && isCurrentIndex;
+
+  return normalizePath(entryPath, process.platform) === normalizePath(currentPath, process.platform);
 }
 
 if (isMainEntry()) {

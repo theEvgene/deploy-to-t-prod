@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 
-import { ensureSystemCa } from "../src/index.js";
+import { ensureSystemCa, isMainEntry } from "../src/index.js";
 
 type SpawnResult = {
   status: number | null;
@@ -155,7 +159,7 @@ test("exits non-zero when signal forwarding does not terminate the process", () 
   assert.ok(exitCalls.includes(1));
 });
 
-test("propagates status 9 as-is on supported runtimes", () => {
+test("propagates unsupported-flag exit 9 with an actionable message", () => {
   const harness = makeHarness(() => ({ status: 9, signal: null }));
   const capture = captureConsoleError();
   try {
@@ -169,50 +173,59 @@ test("propagates status 9 as-is on supported runtimes", () => {
         }),
       /EXIT:9/,
     );
+    assert.equal(harness.spawnCalls.length, 1);
     assert.ok(harness.exitCalls.includes(9));
-    assert.equal(capture.messages.length, 0);
+    assert.equal(capture.messages.length, 1);
+    assert.match(capture.messages[0], /use-system-ca/);
+    assert.match(capture.messages[0], /22\.15\.0/);
+    assert.match(capture.messages[0], /23\.8\.0/);
   } finally {
     capture.restore();
   }
 });
 
-test("rejects runtimes older than 22.15 without spawning", () => {
-  const harness = makeHarness(() => ({ status: 0, signal: null }));
-  const capture = captureConsoleError();
-  try {
-    assert.throws(
-      () =>
-        ensureSystemCa({
-          ...harness,
-          execArgv: [],
-          argv: [process.execPath, "script.js"],
-          version: "v22.14.0",
-        }),
-      /EXIT:1/,
-    );
-    assert.equal(harness.spawnCalls.length, 0);
-    assert.ok(harness.exitCalls.includes(1));
-    assert.ok(capture.messages.some((message) => /22\.15\.0/.test(message)));
-    assert.ok(capture.messages.some((message) => /use-system-ca/.test(message)));
-  } finally {
-    capture.restore();
-  }
-});
+const versionMatrix: { version: string; supported: boolean }[] = [
+  { version: "v20.11.1", supported: false },
+  { version: "v22.14.0", supported: false },
+  { version: "v22.14.9", supported: false },
+  { version: "v22.15.0", supported: true },
+  { version: "v22.20.1", supported: true },
+  { version: "v23.7.3", supported: false },
+  { version: "v23.8.0", supported: true },
+  { version: "v23.11.1", supported: true },
+  { version: "v24.0.0", supported: true },
+  { version: "v24.18.0", supported: true },
+];
 
-test("accepts 22.15.0 as the minimum supported runtime", () => {
-  const harness = makeHarness(() => ({ status: 0, signal: null }));
-  assert.throws(
-    () =>
-      ensureSystemCa({
-        ...harness,
-        execArgv: [],
-        argv: [process.execPath, "script.js"],
-        version: "v22.15.0",
-      }),
-    /EXIT:0/,
-  );
-  assert.equal(harness.spawnCalls.length, 1);
-});
+for (const { version, supported } of versionMatrix) {
+  test(`${supported ? "accepts" : "rejects"} Node.js ${version}`, () => {
+    const harness = makeHarness(() => ({ status: 0, signal: null }));
+    const capture = captureConsoleError();
+    try {
+      assert.throws(
+        () =>
+          ensureSystemCa({
+            ...harness,
+            execArgv: [],
+            argv: [process.execPath, "script.js"],
+            version,
+          }),
+        supported ? /EXIT:0/ : /EXIT:1/,
+      );
+      assert.equal(harness.spawnCalls.length, supported ? 1 : 0);
+      if (supported) {
+        assert.equal(capture.messages.length, 0);
+      } else {
+        assert.ok(capture.messages.some((message) => /22\.15\.0/.test(message)));
+        assert.ok(capture.messages.some((message) => /23\.8\.0/.test(message)));
+        assert.ok(capture.messages.some((message) => /use-system-ca/.test(message)));
+        assert.ok(harness.exitCalls.includes(1));
+      }
+    } finally {
+      capture.restore();
+    }
+  });
+}
 
 test("spawn failure exits non-zero with a minimum-version error", () => {
   const harness = makeHarness(() => ({ status: null, signal: null, error: new Error("bad option") }));
@@ -251,4 +264,76 @@ test("never sets or passes insecure TLS verification env", () => {
   assert.equal(harness.spawnCalls.length, 1);
   assert.equal((harness.spawnCalls[0].options as { env?: unknown }).env, undefined);
   assert.equal(process.env.NODE_TLS_REJECT_UNAUTHORIZED, undefined);
+});
+
+const modulePath = path.join(os.tmpdir(), "sysca-app", "dist", "index.js");
+const moduleUrl = pathToFileURL(modulePath).href;
+
+test("isMainEntry matches an installed bin symlink to the real module", () => {
+  const entry = path.join(os.tmpdir(), "sysca-app", "bin", "release-tag");
+  assert.equal(
+    isMainEntry({
+      entry,
+      moduleUrl,
+      realpath: (value) => (value === entry ? modulePath : value),
+    }),
+    true,
+  );
+});
+
+test("isMainEntry does not match a different file that merely ends with dist/index.js", () => {
+  assert.equal(
+    isMainEntry({
+      entry: path.join(os.tmpdir(), "sysca-other", "dist", "index.js"),
+      moduleUrl,
+      realpath: (value) => value,
+    }),
+    false,
+  );
+});
+
+test("isMainEntry rejects the test runner entry and missing entries", () => {
+  assert.equal(
+    isMainEntry({
+      entry: path.join(os.tmpdir(), "sysca-app", "test", "systemCaReexec.test.ts"),
+      moduleUrl,
+      realpath: (value) => value,
+    }),
+    false,
+  );
+  assert.equal(isMainEntry({ entry: "", realpath: (value) => value }), false);
+});
+
+test("isMainEntry returns false when the entry cannot be resolved", () => {
+  assert.equal(
+    isMainEntry({
+      entry: path.join(os.tmpdir(), "sysca-missing", "release-tag"),
+      moduleUrl,
+      realpath: () => {
+        throw new Error("ENOENT");
+      },
+    }),
+    false,
+  );
+});
+
+test("isMainEntry resolves a real aliased directory", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "sysca-entry-"));
+  try {
+    const realDir = path.join(root, "real");
+    fs.mkdirSync(realDir);
+    const realFile = path.join(realDir, "index.js");
+    fs.writeFileSync(realFile, "");
+    const aliasDir = path.join(root, "alias");
+    fs.symlinkSync(realDir, aliasDir, process.platform === "win32" ? "junction" : "dir");
+    assert.equal(
+      isMainEntry({
+        entry: path.join(aliasDir, "index.js"),
+        moduleUrl: pathToFileURL(realFile).href,
+      }),
+      true,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
