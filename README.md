@@ -4,6 +4,20 @@ CLI utility for preparing and running a GitLab release tag flow.
 
 The repository is safe to publish publicly because project-specific values are stored locally through the config menu, not in tracked files.
 
+## Requirements
+
+Requires Node.js `>=22.15.0 <23 || >=23.8.0` (`22.15.0` or newer below `23`; `23.8.0` or newer on the `23.x` line; `24.x` works; `23.0`–`23.7` are excluded).
+
+The minimum was raised from `>=20` because the `--use-system-ca` entry flag does not exist on Node 20.x: `v20.20.2` rejects it with `bad option: --use-system-ca` (exit `9`), while `v22.23.4` and `v24.18.0` accept it (`node --use-system-ca -e "process.exit(0)"` exits `0`). On runtimes below the floor the CLI exits `1` with a minimum-version message instead of starting (no respawn is attempted).
+
+## TLS and corporate proxy
+
+No manual `NODE_OPTIONS` is needed. At startup the CLI re-executes itself under `node --use-system-ca` when the flag is not already present, so TLS uses the operating-system CA store with full certificate verification. This fixes `SELF_SIGNED_CERT_IN_CHAIN` on machines whose corporate proxy root is in the system store but not in Node's bundled CA set, without skipping verification.
+
+Verification is never disabled: the tool does not set `NODE_TLS_REJECT_UNAUTHORIZED`, does not change `strict-ssl`, does not use `NODE_EXTRA_CA_CERTS`, and does not commit certificate material. If the version check passes but the spawned runtime still rejects the flag, the CLI exits with code `9` and an actionable minimum-version message. `release-tag --help` works without network access and without `NODE_OPTIONS`.
+
+Token handling stays masked and local-only: the GitLab token is stored in `%APPDATA%\release-tag\config.json`, shown only in masked form in the config menu, and never printed in logs or run artifacts.
+
 ## What is configured locally
 
 Run:
